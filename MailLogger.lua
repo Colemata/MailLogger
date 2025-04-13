@@ -28,6 +28,7 @@ local defaults = {
         autoShowExport = true,
         summedExport = false,
         inventoryFormat = true,
+        simpleCSVFormat = false,
     }
 }
 
@@ -50,6 +51,7 @@ function MailLogger:OnInitialize()
     self.autoShowExport = self.db.profile.autoShowExport
     self.summedExport = self.db.profile.summedExport
     self.inventoryFormat = self.db.profile.inventoryFormat
+    self.simpleCSVFormat = self.db.profile.simpleCSVFormat
     
     -- Register character in global list
     self.db.global.characters[self.currentCharacter] = true
@@ -394,7 +396,7 @@ function MailLogger:SlashCommand(input)
         toggle = function() self:ToggleExportPane() end,
         auto = function() self:ToggleAutoShow() end,
         summode = function() self:ToggleSummedMode() end,
-        format = function() self:ToggleInventoryFormat() end, 
+        format = function() self:CycleExportFormat() end,
         test = function() self:TestExportPane() end -- Added for testing
     }
     
@@ -438,7 +440,7 @@ function MailLogger:PrintHelp()
     self:Print("/maillog list - List characters with mail logs")
     self:Print("/maillog fix - Fix blank items in your log")
     self:Print("/maillog test - Test export pane display")
-    self:Print("/maillog format - Toggle between detailed and inventory format")
+    self:Print("/maillog format - Cycle between Excel, Discord, and Simple CSV formats") -- CHANGED this line
     self:Print("/maillog help - Show this help message")
 end
 
@@ -620,8 +622,99 @@ function MailLogger:GetSummedItems()
     return result
 end
 
+-- Add a new function to create the simplified CSV export text
+function MailLogger:CreateSimpleCSVExportText()
+    -- Get the summed items (we always want to sum for this format)
+    local items = self:GetSummedItems()
+    
+    -- Start with a header
+    local exportText = "MailLogger Export for " .. self.currentCharacter .. "\n"
+    exportText = exportText .. "Item,Quantity\n\n"
+    
+    -- Create a table to hold the combined items across all senders
+    local combinedItems = {}
+    
+    -- Combine all items regardless of sender
+    for _, item in ipairs(items) do
+        -- Skip gold entries
+        if item.itemName ~= "Gold" then
+            local itemName = item.itemName
+            if not combinedItems[itemName] then
+                combinedItems[itemName] = 0
+            end
+            combinedItems[itemName] = combinedItems[itemName] + item.count
+        end
+    end
+    
+    -- Convert to a sorted array for consistent output
+    local sortedItems = {}
+    for itemName, count in pairs(combinedItems) do
+        table.insert(sortedItems, {
+            itemName = itemName,
+            count = count
+        })
+    end
+    
+    -- Sort by item name
+    table.sort(sortedItems, function(a, b)
+        return a.itemName < b.itemName
+    end)
+    
+    -- Generate the CSV text
+    for _, item in ipairs(sortedItems) do
+        exportText = exportText .. string.format("%s,%d\n", 
+            item.itemName, item.count)
+    end
+    
+    return exportText
+end
+
+-- NEW FUNCTION: Cycle through formats (Excel -> Discord -> Simple CSV)
+function MailLogger:CycleExportFormat()
+    if self.simpleCSVFormat then
+        -- Currently CSV, switch to Excel
+        self.simpleCSVFormat = false
+        self.inventoryFormat = false
+        self.db.profile.simpleCSVFormat = false
+        self.db.profile.inventoryFormat = false
+        self:Print("Export format: Excel Format")
+    elseif self.inventoryFormat then
+        -- Currently Discord, switch to Simple CSV
+        self.simpleCSVFormat = true
+        self.inventoryFormat = false
+        self.db.profile.simpleCSVFormat = true
+        self.db.profile.inventoryFormat = false
+        
+        -- When enabling Simple CSV, also make sure summed mode is on
+        self.summedExport = true
+        self.db.profile.summedExport = true
+        
+        self:Print("Export format: Simple CSV Format")
+    else
+        -- Currently Excel, switch to Discord
+        self.simpleCSVFormat = false
+        self.inventoryFormat = true
+        self.db.profile.simpleCSVFormat = false
+        self.db.profile.inventoryFormat = true
+        
+        -- Inventory format also requires summed mode
+        self.summedExport = true
+        self.db.profile.summedExport = true
+        
+        self:Print("Export format: Discord Format")
+    end
+    
+    -- Refresh if the pane is open
+    self:RefreshExportFrame()
+end
+
 -- Create the export text in TSV (Tab-Separated Values) format
 function MailLogger:CreateExportText(sumItems)
+
+    -- NEW: Added this condition
+    if self.simpleCSVFormat then
+        return self:CreateSimpleCSVExportText()
+    end
 
     -- If inventory format is enabled, use that instead
     if self.inventoryFormat then
@@ -629,7 +722,7 @@ function MailLogger:CreateExportText(sumItems)
     end
 
     local exportText = "MailLogger Export for " .. self.currentCharacter .. "\n"
-    exportText = exportText .. "Date\tSender\tItem\tQuantity\n"
+    exportText = exportText .. "Date,Sender,Item,Quantity\n\n"
     
     -- Use either the summed data or raw data based on parameter
     local dataToExport = {}
@@ -650,7 +743,7 @@ function MailLogger:CreateExportText(sumItems)
     
     -- Generate the export text
     for _, item in ipairs(dataToExport) do
-        exportText = exportText .. string.format("%s\t%s\t%s\t%s\n", 
+        exportText = exportText .. string.format("%s,%s,%s,%s\n", 
             item.date, item.sender, item.itemName, item.count)
     end
     
@@ -660,7 +753,7 @@ end
 -- Create inventory format version of export data
 function MailLogger:CreateInventoryExportText()
     -- Start with a header
-    local exportText = "MailLogger Inventory Export for " .. self.currentCharacter .. "\n\n"
+    local exportText = "MailLogger Export for " .. self.currentCharacter .. "\n\n"
     
     -- Get the summed items grouped by sender and item
     local items = self:GetSummedItems()
@@ -757,24 +850,18 @@ function MailLogger:RefreshExportFrame()
                 (self.summedExport and " (Summed)" or "") .. " - " .. self.currentCharacter)
         end
 
-        -- Update format button
+        -- Update format button text based on current format
         if self.exportFrame.formatButton then
-            self.exportFrame.formatButton:SetText(self.inventoryFormat and "Excel Format" or "Discord Format")
+            local formatButtonText = "Change Format"
+            if self.simpleCSVFormat then
+                --formatButtonText = formatButtonText .. "Simple CSV"
+            elseif self.inventoryFormat then
+                --formatButtonText = formatButtonText .. "Discord"
+            else
+                --formatButtonText = formatButtonText .. "Excel"
+            end
+            self.exportFrame.formatButton:SetText(formatButtonText)
         end
-
-            -- Update buttons
-    if self.exportFrame.modeButton then
-        self.exportFrame.modeButton:SetText(self.summedExport and "Show All Items" or "Show Summed")
-        
-        -- Disable summed button if inventory mode is enabled
-        if self.inventoryFormat then
-            self.exportFrame.modeButton:Disable()
-            self.exportFrame.modeButton:SetText("Summed (Always On)")
-        else
-            self.exportFrame.modeButton:Enable()
-            self.exportFrame.modeButton:SetText(self.summedExport and "Show All Items" or "Show Summed")
-        end
-    end
 
     end
 end
@@ -787,16 +874,16 @@ function MailLogger:ToggleAutoShow()
     self:Print("Auto-show export pane: " .. (self.autoShowExport and "ENABLED" or "DISABLED"))
 end
 
--- Add function to toggle inventory format
-function MailLogger:ToggleInventoryFormat()
-    self.inventoryFormat = not self.inventoryFormat
-    self.db.profile.inventoryFormat = self.inventoryFormat
+-- -- Add function to toggle inventory format
+-- function MailLogger:ToggleInventoryFormat()
+--     self.inventoryFormat = not self.inventoryFormat
+--     self.db.profile.inventoryFormat = self.inventoryFormat
     
-    self:Print("Export format: " .. (self.inventoryFormat and "Discord Format" or "Excel Format"))
+--     self:Print("Export format: " .. (self.inventoryFormat and "Discord Format" or "Excel Format"))
     
-    -- Refresh if the pane is open
-    self:RefreshExportFrame()
-end
+--     -- Refresh if the pane is open
+--     self:RefreshExportFrame()
+-- end
 
 -- Toggle between regular and summed export mode
 function MailLogger:ToggleSummedMode()
@@ -856,18 +943,10 @@ function MailLogger:ShowExportPane()
     frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     frame:Show()
     
-    -- Update buttons
-    if frame.modeButton then
-        frame.modeButton:SetText(self.summedExport and "Show All Items" or "Show Summed")
-        
-        -- Disable summed button if inventory mode is enabled
-        if self.inventoryFormat then
-            frame.modeButton:Disable()
-            frame.modeButton:SetText("Summed (Always On)")
-        else
-            frame.modeButton:Enable()
-            frame.modeButton:SetText(self.summedExport and "Show All Items" or "Show Summed")
-        end
+    -- Update format button if needed
+    if frame.formatButton then
+        local formatText = "Change Format"
+        frame.formatButton:SetText(formatText)
     end
     
     self:Print("Export pane should now be visible")
@@ -927,7 +1006,7 @@ function MailLogger:CreateExportFrame()
         -- Instructions
         local instructions = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         instructions:SetPoint("TOP", title, "BOTTOM", 0, -5)
-        instructions:SetText("Click 'Copy' to select all text")
+        instructions:SetText("Click 'Highlight' to select all text")
         
         -- Create a simple EditBox with increased width
         local editBox = CreateFrame("EditBox", "MailLoggerExportEditBox", frame)
@@ -964,50 +1043,34 @@ function MailLogger:CreateExportFrame()
             preferredIndex = 3,
         }
         
-        -- Create button container frame to hold all buttons in two rows
+        -- Create button container frame to hold all buttons in a single row at the bottom
         local buttonContainer = CreateFrame("Frame", nil, frame)
-        buttonContainer:SetSize(frame:GetWidth() - 40, 60) -- Taller to accommodate two rows
+        buttonContainer:SetSize(frame:GetWidth() - 40, 30) -- Height for a single row
         buttonContainer:SetPoint("BOTTOM", 0, 15)
         
-        -- Top row of buttons
-        
-        -- Mode toggle button (first button on top row)
-        local modeButton = CreateFrame("Button", nil, buttonContainer, "UIPanelButtonTemplate")
-        modeButton:SetSize(120, 25)
-        modeButton:SetPoint("TOPLEFT", 0, 0)
-        modeButton:SetText(self.summedExport and "Show All Items" or "Show Summed")
-        modeButton:SetScript("OnClick", function() 
-            self:ToggleSummedMode()
-            modeButton:SetText(self.summedExport and "Show All Items" or "Show Summed")
-        end)
-        frame.modeButton = modeButton
-
-        -- Format toggle button (second button on top row)
+        -- Format toggle button
         local formatButton = CreateFrame("Button", nil, buttonContainer, "UIPanelButtonTemplate")
-        formatButton:SetSize(120, 25)
-        formatButton:SetPoint("LEFT", modeButton, "RIGHT", 10, 0)
-        formatButton:SetText(self.inventoryFormat and "Excel Format" or "Discord Format")
+        formatButton:SetSize(100, 25)
+        formatButton:SetPoint("LEFT", 0, 0)
+        formatButton:SetText("Change Format")
         formatButton:SetScript("OnClick", function()
-            self:ToggleInventoryFormat()
-            formatButton:SetText(self.inventoryFormat and "Excel Format" or "Discord Format")
+            self:CycleExportFormat()
         end)
         frame.formatButton = formatButton
         
-        -- Bottom row of buttons
-
-        -- Clear button (first button on bottom row)
+        -- Clear button
         local clearButton = CreateFrame("Button", nil, buttonContainer, "UIPanelButtonTemplate")
-        clearButton:SetSize(100, 25)
-        clearButton:SetPoint("TOPLEFT", modeButton, "BOTTOMLEFT", 0, -10)
+        clearButton:SetSize(80, 25)
+        clearButton:SetPoint("LEFT", formatButton, "RIGHT", 10, 0)
         clearButton:SetText("Clear Log")
         clearButton:SetScript("OnClick", function()
             StaticPopup_Show("MAILLOGGER_CONFIRM_CLEAR")
         end)
         frame.clearButton = clearButton
         
-        -- Copy button (second button on bottom row)
+        -- Copy button
         local copyButton = CreateFrame("Button", nil, buttonContainer, "UIPanelButtonTemplate")
-        copyButton:SetSize(100, 25)
+        copyButton:SetSize(80, 25)
         copyButton:SetPoint("LEFT", clearButton, "RIGHT", 10, 0)
         copyButton:SetText("Highlight")
         copyButton:SetScript("OnClick", function() 
@@ -1015,9 +1078,9 @@ function MailLogger:CreateExportFrame()
             editBox:HighlightText()
         end)
     
-        -- Close button (third button on bottom row)
+        -- Close button
         local closeButton = CreateFrame("Button", nil, buttonContainer, "UIPanelButtonTemplate")
-        closeButton:SetSize(100, 25)
+        closeButton:SetSize(80, 25)
         closeButton:SetPoint("LEFT", copyButton, "RIGHT", 10, 0)
         closeButton:SetText("Close")
         closeButton:SetScript("OnClick", function() 
